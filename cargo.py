@@ -1,66 +1,94 @@
+"""
+cargo.py - Módulo de control de hardware para un robot tipo forklift (montacargas).
+
+Este archivo define las clases y funciones necesarias para controlar motores, servo,
+y calcular la lógica de dirección de un robot controlado remotamente.
+
+Aunque los detalles físicos del robot no son el foco del repositorio, este módulo
+ilustra cómo se encapsula la lógica de movimiento que puede ser llamada desde un
+servidor WebSocket, permitiendo el control desde un dispositivo móvil.
+"""
+
 from machine import Pin, PWM
 import utime
 
-ENA = 8
-IN1 = 9
-IN2 = 10
-IN3 = 11
-IN4 = 12
-ENB = 13
+# Pines de control para los motores
+ENA = 8  # PWM motor izquierdo
+IN1 = 9  # Dirección motor izquierdo
+IN2 = 10  # Dirección motor izquierdo
+IN3 = 11  # Dirección motor derecho
+IN4 = 12  # Dirección motor derecho
+ENB = 13  # PWM motor derecho
 
+# Pin del servo de elevación
 SERVO = 1
 
 
 def turn_on_led():
+    """Enciende el LED de la placa como indicador visual de encendido."""
     led = Pin("LED", Pin.OUT)
     led.on()
 
 
 def calc_L(x: float, y: float) -> float:
+    """
+    Calcula una longitud de giro para maniobras especiales del robot.
+
+    Este valor se usa para ajustar la diferencia de velocidad entre los motores
+    cuando se quiere hacer un giro en el lugar o en curva.
+    """
     L = []
     if y != -1:
-        L.append(x/(y+1))
-        L.append(-x/(y+1))
+        L.append(x / (y + 1))
+        L.append(-x / (y + 1))
     if y != 1:
-        L.append(x/(y-1))
-        L.append(x/(1-y))
+        L.append(x / (y - 1))
+        L.append(x / (1 - y))
     L = abs(max(L))
-    if L == 0:
-        L = 1
-    return L
+    return L if L != 0 else 1
 
 
 def clamp(num, min_value, max_value):
-    if num > max_value:
-        return max_value
-    if num < min_value:
-        return min_value
-    return num
+    """Restringe un valor numérico entre un mínimo y un máximo."""
+    return max(min(num, max_value), min_value)
+
 
 def sign(num):
-    if num > 0:
-        return 1
-    elif num < 0:
-        return -1
-    else:
-        return 0
+    """Devuelve el signo de un número (-1, 0 o 1)."""
+    return (num > 0) - (num < 0)
 
 
 class Control:
-    def __init__(self):
-        turn_on_led()
-        self.x = 0 # x relative
-        self.y = 0 # y relative
-        self.r = 0 # radius
-        self.a = 0 # angle in degrees
-        self.e = 0 # dy elevation
+    """
+    Clase principal para manejar la lógica del robot.
 
+    A partir de valores enviados desde el cliente (por WebSocket), actualiza
+    la dirección, velocidad y elevación del robot.
+    """
+
+    def __init__(self):
+        turn_on_led()  # Indica que el controlador ha iniciado
+
+        # Variables internas
+        self.x = 0  # movimiento lateral
+        self.y = 0  # movimiento frontal
+        self.r = 0  # radio de giro
+        self.a = 0  # ángulo
+        self.e = 0  # dirección de elevación
+
+        # Instancias de motores y servo
         self.motor_left = Motor(ENA, IN2, IN1)
         self.motor_right = Motor(ENB, IN4, IN3)
-
-        self.servo = Servo(SERVO, min_duty=870, max_duty=7300, min_angle=-90, max_angle=90)
+        self.servo = Servo(
+            SERVO, min_duty=870, max_duty=7300, min_angle=-90, max_angle=90
+        )
 
     def update_values(self, data: dict) -> None:
+        """
+        Actualiza los valores internos de dirección y elevación.
+
+        Este método es llamado con los datos que llegan del teléfono.
+        """
         self.x = data["x"]
         self.y = data["y"]
         self.r = data["r"]
@@ -68,98 +96,50 @@ class Control:
         self.e = data["e"]
 
     def update_direction(self) -> None:
-        x = self.x
-        y = self.y
+        """
+        Calcula las velocidades de los motores izquierdo y derecho con base
+        en los valores de x e y recibidos.
+
+        Usa una lógica para manejar movimiento recto, giros y maniobras suaves.
+        """
+        x, y = self.x, self.y
         vel_left = 0
         vel_right = 0
+
+        # Giro en el lugar si x es dominante
         if abs(x) > 0.7 and abs(y) < 0.25:
             L = calc_L(x, y)
-            vel_left = y - x/L
-            vel_right = x/L + y
+            vel_left = y - x / L
+            vel_right = x / L + y
         else:
+            # Movimiento lineal o curva suave
             if abs(x) < 0.05:
-                vel_right = y
-                vel_left = y
-            elif -x >= 0:
+                vel_left = vel_right = y
+            elif x <= 0:
                 vel_left = sign(y)
                 vel_right = 0.005 * sign(y)
-                #vel_right = y * (1 - abs(x))/2
             else:
                 vel_right = sign(y)
                 vel_left = 0.005 * sign(y)
-                # vel_left = y * (1 - abs(x))/2
+
         self.motor_left.set_velocity(vel_left)
         self.motor_right.set_velocity(vel_right)
 
     def update_elevation(self) -> None:
-        rate = 0.5  # degrees
+        """
+        Ajusta el ángulo del servo de elevación según el valor de `e`.
+
+        Este control permite subir o bajar una plataforma tipo forklift.
+        """
+        rate = 0.5  # Grados por ciclo de actualización
         if self.e != 0:
-            self.servo.increase(rate*self.e)
+            self.servo.increase(rate * self.e)
 
 
 class Motor:
+    """
+    Clase que encapsula el control de un motor con dirección y velocidad PWM.
+    """
+
     def __init__(self, pin_speed: int, pin_forward: int, pin_back: int):
         self.pin_forward = Pin(pin_forward, Pin.OUT)
-        self.pin_back = Pin(pin_back, Pin.OUT)
-
-        self.pin_speed = PWM(Pin(pin_speed, Pin.OUT))
-        self.pin_speed.freq(1500)
-        self.min_speed = 30000
-        self.max_speed = int(65535)
-
-    def set_velocity(self, velocity: float) -> None:
-        """ set velocity
-        param: velocity: númmero entero entre -1 y 1 que
-               determina la dirección y velocidad del motor
-        """
-        dv = self.max_speed - self.min_speed
-        self.speed = self.min_speed + abs(velocity) * dv
-        self.pin_speed.duty_u16(int(self.speed))
-        # self.pin_speed.duty_u16(self.max_speed)
-        if velocity > 0:
-            self.pin_forward.on()
-            self.pin_back.off()
-        elif velocity < 0:
-            self.pin_forward.off()
-            self.pin_back.on()
-        else:
-            self.pin_forward.off()
-            self.pin_back.off()
-
-
-class Servo():
-    def __init__(self, pin_pwm: int, min_duty: int, max_duty: int, min_angle: float = -90, max_angle: float = 90, rest_angle: float = 0):
-        self.pwm = PWM(Pin(pin_pwm, Pin.OUT))
-        self.pwm.freq(50)
-        self.min_duty = min_duty
-        self.max_duty = max_duty
-        self.min_angle = min_angle
-        self.max_angle = max_angle
-        self.rest_angle = rest_angle
-        self.reset()
-
-    def set(self, angle: float) -> None:
-        angle = clamp(angle, self.min_angle, self.max_angle)
-        self.angle = angle
-        d_duty = self.max_duty - self.min_duty
-        d_angle = self.max_angle - self.min_angle
-        duty = (angle - self.min_angle) * (d_duty/d_angle) + self.min_duty
-        self.pwm.duty_u16(int(duty))
-
-    def increase(self, rate: float) -> None:
-        old = self.angle
-        self.angle += rate
-        self.angle = clamp(self.angle, self.min_angle, self.max_angle)
-        self.set(self.angle)
-        if old != self.angle:
-            self.set(self.angle)
-
-    def decrease(self, rate: float) -> None:
-        old = self.angle
-        self.angle -= rate
-        self.angle = clamp(self.angle, self.min_angle, self.max_angle)
-        if old != self.angle:
-            self.set(self.angle)
-
-    def reset(self) -> None:
-        self.set(self.rest_angle)
