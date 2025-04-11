@@ -1,5 +1,5 @@
-SSID = "AKI TOY"
-SSI_PASSWORD = "akitoy2024"
+SSID = "My Device"
+SSI_PASSWORD = "password"
 
 def do_connect():
     import network
